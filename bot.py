@@ -14,9 +14,7 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID"))
-
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDS = os.getenv("GOOGLE_CREDS", "service_account.json")
 
 HR_CHANNEL_ID = int(os.getenv("HR_CHANNEL_ID"))
 PUNISH_CHANNEL_ID = int(os.getenv("PUNISH_CHANNEL_ID"))
@@ -141,19 +139,11 @@ def date_now() -> str:
 def load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-
-    return {
-        "registry": [],
-        "hr": [],
-        "punish": [],
-    }
+    return {"registry": [], "hr": [], "punish": []}
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def row_key(row: dict) -> str:
@@ -170,10 +160,12 @@ def get_col(row: dict, *names: str) -> str:
 def get_google_rows() -> dict:
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
-    creds = Credentials.from_service_account_file(
-        GOOGLE_CREDS,
-        scopes=scopes
-    )
+    creds_json = os.getenv("GOOGLE_CREDS_JSON")
+    if not creds_json:
+        raise Exception("НЕТ GOOGLE_CREDS_JSON В RAILWAY VARIABLES")
+
+    creds_info = json.loads(creds_json)
+    creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
 
     client = gspread.authorize(creds)
     book = client.open_by_key(SPREADSHEET_ID)
@@ -191,37 +183,26 @@ def get_role(guild: discord.Guild, role_id: int | None):
     return guild.get_role(role_id)
 
 
-def role_mention(guild: discord.Guild, role_id: int | None, fallback: str) -> str:
+def role_text(guild: discord.Guild, role_id: int | None, fallback: str) -> str:
     role = get_role(guild, role_id)
-
-    if not role:
-        print(f"❌ Роль не найдена для тега: {fallback} | ID: {role_id}")
-        return f"`{fallback}`"
-
-    return role.mention
+    return role.mention if role else f"`{fallback}`"
 
 
 def find_name_in_registry(registry_rows: list[dict], static: str) -> str:
     static_digits = only_digits(static)
-
     if not static_digits:
         return ""
 
     for row in registry_rows:
         row_static = get_col(row, "Статик")
-        row_static_digits = only_digits(row_static)
-
-        if row_static_digits == static_digits:
-            name = get_col(row, "Имя Фамилия", "Ваше имя фамилия", "Ваше Имя Фамилия")
-            if name:
-                return name
+        if only_digits(row_static) == static_digits:
+            return get_col(row, "Имя Фамилия", "Ваше имя фамилия", "Ваше Имя Фамилия")
 
     return ""
 
 
 async def find_member_by_name(guild: discord.Guild, full_name: str) -> discord.Member | None:
     name_clean = clean_text(full_name)
-
     if not name_clean:
         return None
 
@@ -230,16 +211,8 @@ async def find_member_by_name(guild: discord.Guild, full_name: str) -> discord.M
         username = clean_text(member.name)
         global_name = clean_text(member.global_name) if member.global_name else ""
 
-        if name_clean in display:
-            print(f"✅ Участник найден по нику сервера: {member.display_name}")
-            return member
-
-        if name_clean in username:
-            print(f"✅ Участник найден по username: {member.name}")
-            return member
-
-        if global_name and name_clean in global_name:
-            print(f"✅ Участник найден по global_name: {member.global_name}")
+        if name_clean in display or name_clean in username or name_clean in global_name:
+            print(f"✅ Участник найден: {member.display_name}")
             return member
 
     print(f"❌ Участник не найден по имени: {full_name}")
@@ -258,35 +231,28 @@ async def find_member_from_registry(
     print(f"🔎 Поиск участника: static='{static}' | name='{final_name}'")
 
     member = await find_member_by_name(guild, final_name)
-
     return member, final_name
 
 
-def member_text(member: discord.Member | None, fallback: str) -> str:
-    return member.mention if member else f"`{fallback}`"
+def user_line(member: discord.Member | None, static: str, name: str) -> str:
+    mention = member.mention if member else "`Не найден`"
+    return f"🆔 **[{static}] {name}** (( {mention} ))"
 
 
-async def send_to_hr(embed: discord.Embed):
-    channel = bot.get_channel(HR_CHANNEL_ID)
-    if channel:
-        await channel.send(embed=embed)
-    else:
-        print("❌ Канал кадрового аудита не найден")
+async def send_message(channel_id: int, text: str):
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        print(f"❌ Канал не найден: {channel_id}")
+        return
+
+    msg = await channel.send(text)
+    try:
+        await msg.add_reaction("✅")
+    except Exception:
+        pass
 
 
-async def send_to_punish(embed: discord.Embed):
-    channel = bot.get_channel(PUNISH_CHANNEL_ID)
-    if channel:
-        await channel.send(embed=embed)
-    else:
-        print("❌ Канал аудита взысканий не найден")
-
-
-async def add_roles(
-    member: discord.Member | None,
-    guild: discord.Guild,
-    role_ids: list[int | None],
-):
+async def add_roles(member: discord.Member | None, guild: discord.Guild, role_ids: list[int | None]):
     if not member:
         print("❌ Роли не выданы: участник не найден")
         return
@@ -294,24 +260,17 @@ async def add_roles(
     bot_member = guild.me
     roles_to_add = []
 
-    print(f"\n=== ВЫДАЧА РОЛЕЙ ДЛЯ {member} ===")
-    print(f"Высшая роль бота: {bot_member.top_role.name} | позиция {bot_member.top_role.position}")
-
     for role_id in role_ids:
         if not role_id:
-            print("❌ Пустой ID роли. Проверь .env")
+            print("❌ Пустой ID роли")
             continue
 
         role = guild.get_role(role_id)
-
         if not role:
             print(f"❌ Роль не найдена по ID: {role_id}")
             continue
 
-        print(f"Проверяю роль: {role.name} | ID {role.id} | позиция {role.position}")
-
         if role in member.roles:
-            print(f"ℹ️ У участника уже есть роль: {role.name}")
             continue
 
         if role >= bot_member.top_role:
@@ -321,16 +280,15 @@ async def add_roles(
         roles_to_add.append(role)
 
     if not roles_to_add:
-        print("❌ Нет ролей для выдачи")
         return
 
     try:
         await member.add_roles(*roles_to_add, reason="Автоаудит из Google Sheets")
         print(f"✅ Выданы роли: {', '.join(r.name for r in roles_to_add)}")
     except discord.Forbidden:
-        print("❌ Discord запретил выдачу ролей: нет прав или роль бота ниже")
+        print("❌ Discord запретил выдачу ролей")
     except discord.HTTPException as e:
-        print(f"❌ Discord HTTP ошибка при выдаче ролей: {e}")
+        print(f"❌ Discord HTTP ошибка: {e}")
 
 
 async def remove_roles(member: discord.Member | None, role_ids: list[int | None]):
@@ -350,7 +308,6 @@ async def remove_roles(member: discord.Member | None, role_ids: list[int | None]
             roles_to_remove.append(role)
 
     if not roles_to_remove:
-        print("ℹ️ Нет ролей для снятия")
         return
 
     try:
@@ -359,7 +316,7 @@ async def remove_roles(member: discord.Member | None, role_ids: list[int | None]
     except discord.Forbidden:
         print("❌ Discord запретил снятие ролей")
     except discord.HTTPException as e:
-        print(f"❌ Discord HTTP ошибка при снятии ролей: {e}")
+        print(f"❌ Discord HTTP ошибка: {e}")
 
 
 async def remove_all_staff_roles(member: discord.Member | None):
@@ -393,41 +350,16 @@ async def handle_new_registry(row: dict, guild: discord.Guild, registry_rows: li
     reason = get_col(row, "Причина")
     rank = get_col(row, "Ранг")
 
-    member, final_name = await find_member_from_registry(
-        guild=guild,
-        registry_rows=registry_rows,
-        static=static,
-        fallback_name=full_name,
+    member, final_name = await find_member_from_registry(guild, registry_rows, static, full_name)
+    rank_tag = role_text(guild, RANK_ROLES.get(rank), rank)
+
+    text = (
+        f"1. {user_line(member, static, final_name)}\n"
+        f"2. 🆕 Принят на работу на ранг {rank_tag} // {reason if reason else 'Не указана'}\n"
+        f"3. 🗓️ Дата принятия: **{date_now()}**"
     )
 
-    rank_tag = role_mention(guild, RANK_ROLES.get(rank), rank)
-
-    embed = discord.Embed(
-        title="📥 Новый участник",
-        color=0x2ECC71
-    )
-
-    embed.add_field(
-        name="👤 Сотрудник",
-        value=f"{member_text(member, final_name)}\n`{static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📌 Действие",
-        value=f"Принят в семью на ранг {rank_tag}",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📝 Причина",
-        value=reason if reason else "Не указана",
-        inline=False
-    )
-
-    embed.set_footer(text=f"Дата: {date_now()}")
-
-    await send_to_hr(embed)
+    await send_message(HR_CHANNEL_ID, text)
 
     roles_to_add = [RANK_ROLES.get(rank)]
 
@@ -444,43 +376,22 @@ async def handle_fire(row: dict, guild: discord.Guild, registry_rows: list[dict]
     auditor_static = get_col(row, "Ваш Статик")
     target_static = get_col(row, "Статик Сотрудника", "Статик сотрудника")
 
-    auditor_name_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
-    target_name_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
+    auditor_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
+    target_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
 
-    auditor, auditor_name = await find_member_from_registry(
-        guild, registry_rows, auditor_static, auditor_name_fallback
+    auditor, auditor_name = await find_member_from_registry(guild, registry_rows, auditor_static, auditor_fallback)
+    target, target_name = await find_member_from_registry(guild, registry_rows, target_static, target_fallback)
+
+    reason = get_col(row, "Причина")
+
+    text = (
+        f"1. {user_line(auditor, auditor_static, auditor_name)}\n"
+        f"2. {user_line(target, target_static, target_name)}\n"
+        f"3. ⭕ Уволен из семьи // {reason if reason else 'Не указана'}\n"
+        f"4. 🗓️ Дата увольнения: **{date_now()}**"
     )
 
-    target, target_name = await find_member_from_registry(
-        guild, registry_rows, target_static, target_name_fallback
-    )
-
-    embed = discord.Embed(
-        title="📤 Увольнение",
-        color=0xE74C3C
-    )
-
-    embed.add_field(
-        name="👮 Кто оформил",
-        value=f"{member_text(auditor, auditor_name)}\n`{auditor_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="👤 Сотрудник",
-        value=f"{member_text(target, target_name)}\n`{target_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📌 Действие",
-        value="Уволен из семьи",
-        inline=False
-    )
-
-    embed.set_footer(text=f"Дата: {date_now()}")
-
-    await send_to_hr(embed)
+    await send_message(HR_CHANNEL_ID, text)
     await fire_member(target, guild)
 
 
@@ -488,60 +399,31 @@ async def handle_promotion(row: dict, guild: discord.Guild, registry_rows: list[
     auditor_static = get_col(row, "Ваш Статик")
     target_static = get_col(row, "Статик Сотрудника", "Статик сотрудника")
 
-    auditor_name_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
-    target_name_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
+    auditor_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
+    target_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
 
     old_rank = get_col(row, "С какого ранга", "Старый ранг", "На какой ранг понижаете?")
     new_rank = get_col(row, "На какой ранг повышаете?", "Новый ранг")
     reason = get_col(row, "Причина")
 
-    auditor, auditor_name = await find_member_from_registry(
-        guild, registry_rows, auditor_static, auditor_name_fallback
-    )
+    auditor, auditor_name = await find_member_from_registry(guild, registry_rows, auditor_static, auditor_fallback)
+    target, target_name = await find_member_from_registry(guild, registry_rows, target_static, target_fallback)
 
-    target, target_name = await find_member_from_registry(
-        guild, registry_rows, target_static, target_name_fallback
-    )
+    new_rank_tag = role_text(guild, RANK_ROLES.get(new_rank), new_rank)
 
-    new_rank_tag = role_mention(guild, RANK_ROLES.get(new_rank), new_rank)
-
-    action_text = f"Повышен на ранг {new_rank_tag}"
+    action = f"☑️ Повышен на ранг {new_rank_tag} // {reason if reason else 'Не указана'}"
 
     if old_rank in {"Старший Стажер", "Старший стажер"} and new_rank in {"Помощник Защиты", "Помощник защиты"}:
-        action_text += "\nИ был переведен в Отдел Элитной Защиты"
+        action += "\n   🔒 Переведен в отдел: **Отдел Элитной Защиты**"
 
-    embed = discord.Embed(
-        title="📈 Повышение",
-        color=0x3498DB
+    text = (
+        f"1. {user_line(auditor, auditor_static, auditor_name)}\n"
+        f"2. {user_line(target, target_static, target_name)}\n"
+        f"3. {action}\n"
+        f"4. 🗓️ Дата повышения: **{date_now()}**"
     )
 
-    embed.add_field(
-        name="👮 Кто оформил",
-        value=f"{member_text(auditor, auditor_name)}\n`{auditor_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="👤 Сотрудник",
-        value=f"{member_text(target, target_name)}\n`{target_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📌 Действие",
-        value=action_text,
-        inline=False
-    )
-
-    embed.add_field(
-        name="📝 Причина",
-        value=reason if reason else "Не указана",
-        inline=False
-    )
-
-    embed.set_footer(text=f"Дата: {date_now()}")
-
-    await send_to_hr(embed)
+    await send_message(HR_CHANNEL_ID, text)
 
     await remove_roles(target, [RANK_ROLES.get(old_rank)])
     await add_roles(target, guild, [RANK_ROLES.get(new_rank)])
@@ -561,56 +443,27 @@ async def handle_department_transfer(row: dict, guild: discord.Guild, registry_r
     auditor_static = get_col(row, "Ваш Статик")
     target_static = get_col(row, "Статик Сотрудника", "Статик сотрудника")
 
-    auditor_name_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
-    target_name_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
+    auditor_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
+    target_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
 
     from_dept = get_col(row, "От куда перевод?", "Откуда перевод?", "От куда переведен", "Откуда переведен")
     to_dept = get_col(row, "Куда Перевод?", "Куда перевод?", "Куда переведен")
     reason = get_col(row, "Причина")
 
-    auditor, auditor_name = await find_member_from_registry(
-        guild, registry_rows, auditor_static, auditor_name_fallback
+    auditor, auditor_name = await find_member_from_registry(guild, registry_rows, auditor_static, auditor_fallback)
+    target, target_name = await find_member_from_registry(guild, registry_rows, target_static, target_fallback)
+
+    from_tag = role_text(guild, DEPARTMENT_ROLES.get(from_dept), from_dept)
+    to_tag = role_text(guild, DEPARTMENT_ROLES.get(to_dept), to_dept)
+
+    text = (
+        f"1. {user_line(auditor, auditor_static, auditor_name)}\n"
+        f"2. {user_line(target, target_static, target_name)}\n"
+        f"3. 🔁 Переведен из отдела {from_tag} в {to_tag} // {reason if reason else 'Не указана'}\n"
+        f"4. 🗓️ Дата перевода: **{date_now()}**"
     )
 
-    target, target_name = await find_member_from_registry(
-        guild, registry_rows, target_static, target_name_fallback
-    )
-
-    from_tag = role_mention(guild, DEPARTMENT_ROLES.get(from_dept), from_dept)
-    to_tag = role_mention(guild, DEPARTMENT_ROLES.get(to_dept), to_dept)
-
-    embed = discord.Embed(
-        title="🔁 Перевод отдела",
-        color=0xF1C40F
-    )
-
-    embed.add_field(
-        name="👮 Кто оформил",
-        value=f"{member_text(auditor, auditor_name)}\n`{auditor_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="👤 Сотрудник",
-        value=f"{member_text(target, target_name)}\n`{target_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📌 Действие",
-        value=f"Переведен из {from_tag} в {to_tag}",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📝 Причина",
-        value=reason if reason else "Не указана",
-        inline=False
-    )
-
-    embed.set_footer(text=f"Дата: {date_now()}")
-
-    await send_to_hr(embed)
+    await send_message(HR_CHANNEL_ID, text)
 
     await remove_roles(target, [DEPARTMENT_ROLES.get(from_dept)])
     await add_roles(target, guild, [DEPARTMENT_ROLES.get(to_dept)])
@@ -620,69 +473,39 @@ async def handle_punishment(row: dict, guild: discord.Guild, registry_rows: list
     auditor_static = get_col(row, "Ваш Статик")
     target_static = get_col(row, "Статик Сотрудника", "Статик сотрудника")
 
-    auditor_name_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
-    target_name_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
+    auditor_fallback = get_col(row, "Ваше Имя Фамилия", "Ваше имя фамилия")
+    target_fallback = get_col(row, "Имя Фамилия Сотрудника", "Имя фамилия сотрудника", "Сотрудник")
 
     reason = get_col(row, "Причина")
 
-    auditor, auditor_name = await find_member_from_registry(
-        guild, registry_rows, auditor_static, auditor_name_fallback
-    )
-
-    target, target_name = await find_member_from_registry(
-        guild, registry_rows, target_static, target_name_fallback
-    )
+    auditor, auditor_name = await find_member_from_registry(guild, registry_rows, auditor_static, auditor_fallback)
+    target, target_name = await find_member_from_registry(guild, registry_rows, target_static, target_fallback)
 
     current_warn = 0
 
     if target:
-        target_role_ids = [role.id for role in target.roles]
-
-        if PUNISH_ROLES[1] in target_role_ids:
+        role_ids = [r.id for r in target.roles]
+        if PUNISH_ROLES[1] in role_ids:
             current_warn = 1
-        elif PUNISH_ROLES[2] in target_role_ids:
+        elif PUNISH_ROLES[2] in role_ids:
             current_warn = 2
-        elif PUNISH_ROLES[3] in target_role_ids:
+        elif PUNISH_ROLES[3] in role_ids:
             current_warn = 3
 
     next_warn = min(current_warn + 1, 3)
 
     old_warn_role = PUNISH_ROLES.get(current_warn)
     new_warn_role = PUNISH_ROLES.get(next_warn)
-    warn_tag = role_mention(guild, new_warn_role, f"Выговор {next_warn}/3")
+    warn_tag = role_text(guild, new_warn_role, f"Выговор {next_warn}/3")
 
-    embed = discord.Embed(
-        title="⚠️ Взыскание",
-        color=0xE67E22
+    text = (
+        f"1. {user_line(auditor, auditor_static, auditor_name)}\n"
+        f"2. {user_line(target, target_static, target_name)}\n"
+        f"3. ⚠️ Получил взыскание {warn_tag} // {reason if reason else 'Не указана'}\n"
+        f"4. 🗓️ Дата взыскания: **{date_now()}**"
     )
 
-    embed.add_field(
-        name="👮 Кто оформил",
-        value=f"{member_text(auditor, auditor_name)}\n`{auditor_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="👤 Сотрудник",
-        value=f"{member_text(target, target_name)}\n`{target_static}`",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📌 Действие",
-        value=f"Получили {warn_tag}",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📝 Причина",
-        value=reason if reason else "Не указана",
-        inline=False
-    )
-
-    embed.set_footer(text=f"Дата: {date_now()}")
-
-    await send_to_punish(embed)
+    await send_message(PUNISH_CHANNEL_ID, text)
 
     if old_warn_role:
         await remove_roles(target, [old_warn_role])
@@ -690,32 +513,13 @@ async def handle_punishment(row: dict, guild: discord.Guild, registry_rows: list
     await add_roles(target, guild, [new_warn_role])
 
     if next_warn >= 3:
-        fire_embed = discord.Embed(
-            title="📤 Увольнение",
-            color=0xE74C3C
+        fire_text = (
+            f"1. {user_line(auditor, auditor_static, auditor_name)}\n"
+            f"2. {user_line(target, target_static, target_name)}\n"
+            f"3. ⭕ Уволен из семьи по причине: 3/3 взысканий\n"
+            f"4. 🗓️ Дата увольнения: **{date_now()}**"
         )
-
-        fire_embed.add_field(
-            name="👮 Кто оформил",
-            value=f"{member_text(auditor, auditor_name)}\n`{auditor_static}`",
-            inline=False
-        )
-
-        fire_embed.add_field(
-            name="👤 Сотрудник",
-            value=f"{member_text(target, target_name)}\n`{target_static}`",
-            inline=False
-        )
-
-        fire_embed.add_field(
-            name="📌 Действие",
-            value="Уволен из семьи",
-            inline=False
-        )
-
-        fire_embed.set_footer(text=f"Дата: {date_now()}")
-
-        await send_to_hr(fire_embed)
+        await send_message(HR_CHANNEL_ID, fire_text)
         await fire_member(target, guild)
 
 
@@ -734,7 +538,7 @@ async def handle_hr_row(row: dict, guild: discord.Guild, registry_rows: list[dic
         await handle_department_transfer(row, guild, registry_rows)
         return
 
-    print(f"❌ Неизвестное действие в кадровом аудите: {action}")
+    print(f"❌ Неизвестное действие: {action}")
 
 
 @tasks.loop(seconds=CHECK_EVERY_SECONDS)
